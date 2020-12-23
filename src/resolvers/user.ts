@@ -1,6 +1,13 @@
-import { Resolver, Mutation, Arg, Ctx, Query } from 'type-graphql';
+import {
+	Resolver,
+	Mutation,
+	Arg,
+	Ctx,
+	Query,
+	FieldResolver,
+	Root,
+} from 'type-graphql';
 import argon2 from 'argon2';
-import { EntityManager } from '@mikro-orm/postgresql';
 import { v4 } from 'uuid';
 import { User } from '../entities/User';
 import { MyContext } from '../types';
@@ -9,15 +16,24 @@ import { UsernamePasswordInput } from '../utils/UsernamePasswordInput';
 import { validateRegister } from '../utils/validateRegister';
 import { UserResponse } from '../utils/UserResponse';
 import { sendEmail } from '../utils/sendEmail';
+import { getConnection } from 'typeorm';
 
-@Resolver()
+@Resolver(User)
 export class UserResolver {
+	@FieldResolver(() => String)
+	email(@Root() user: User, @Ctx() { req }: MyContext) {
+		if (req.session.userId === user.id) {
+			return user.email;
+		}
+		return '';
+	}
+
 	@Mutation(() => Boolean)
 	async forgotPassword(
 		@Arg('email') email: string,
-		@Ctx() { em, redis }: MyContext,
+		@Ctx() { redis }: MyContext,
 	) {
-		const user = await em.findOne(User, { email });
+		const user = await User.findOne({ where: { email } });
 		if (!user) {
 			return true;
 		}
@@ -39,7 +55,7 @@ export class UserResolver {
 	async changePassword(
 		@Arg('token') token: string,
 		@Arg('newPassword') newPassword: string,
-		@Ctx() { req, em, redis }: MyContext,
+		@Ctx() { req, redis }: MyContext,
 	): Promise<UserResponse> {
 		if (newPassword.length <= 3) {
 			return {
@@ -57,32 +73,35 @@ export class UserResolver {
 				errors: [{ field: 'token', message: 'token expired' }],
 			};
 		}
-		const user = await em.findOne(User, { id: +userId });
+		const user = await User.findOne(+userId);
 		if (!user) {
 			return {
 				errors: [{ field: 'token', message: 'user no longer exists' }],
 			};
 		}
-		user.password = await argon2.hash(newPassword);
-		await em.persistAndFlush(user);
+		await User.update(
+			{ id: +userId },
+			{
+				password: await argon2.hash(newPassword),
+			},
+		);
 		await redis.del(__FORGET_PASSWORD_PREFIX__ + token);
 		req.session.userId = user.id;
 		return { user };
 	}
 
 	@Query(() => User, { nullable: true })
-	async me(@Ctx() { em, req }: MyContext) {
+	me(@Ctx() { req }: MyContext) {
 		if (!req.session.userId) {
 			return null;
 		}
-		const user = await em.findOne(User, { id: req.session.userId });
-		return user;
+		return User.findOne({ id: req.session.userId });
 	}
 
 	@Mutation(() => UserResponse)
 	async register(
 		@Arg('options') options: UsernamePasswordInput,
-		@Ctx() { em, req }: MyContext,
+		@Ctx() { req }: MyContext,
 	): Promise<UserResponse> {
 		const errors = validateRegister(options);
 		if (errors) {
@@ -91,19 +110,19 @@ export class UserResolver {
 		const hashedPass = await argon2.hash(options.password);
 		let user;
 		try {
-			const results = await (em as EntityManager)
-				.createQueryBuilder(User)
-				.getKnexQuery()
-				.insert({
+			// * just an alternative approach via query builder
+			const result = await getConnection()
+				.createQueryBuilder()
+				.insert()
+				.into(User)
+				.values({
 					username: options.username,
 					email: options.email,
 					password: hashedPass,
-					created_at: new Date(),
-					updated_at: new Date(),
 				})
-				.returning('*');
-			const users = results.map((user) => em.map(User, user));
-			user = users[0];
+				.returning('*')
+				.execute();
+			user = result.raw[0];
 		} catch (error) {
 			if (error.code === '23505' || error.message.includes('already exists')) {
 				return {
@@ -124,13 +143,12 @@ export class UserResolver {
 	async login(
 		@Arg('usernameOrEmail') usernameOrEmail: string,
 		@Arg('password') password: string,
-		@Ctx() { em, req }: MyContext,
+		@Ctx() { req }: MyContext,
 	): Promise<UserResponse> {
-		const user = await em.findOne(
-			User,
+		const user = await User.findOne(
 			usernameOrEmail.includes('@')
-				? { email: usernameOrEmail }
-				: { username: usernameOrEmail },
+				? { where: { email: usernameOrEmail } }
+				: { where: { username: usernameOrEmail } },
 		);
 		if (!user) {
 			return {
