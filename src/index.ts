@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import 'dotenv-safe/config';
 import express from 'express';
 import { ApolloServer } from 'apollo-server-express';
 import { buildSchema } from 'type-graphql';
@@ -20,6 +21,8 @@ import { MyContext } from './types';
 import { Post } from './entities/Post';
 import { User } from './entities/User';
 import { Updoot } from './entities/Updoot';
+import { createCreatorLoader } from './utils/CreatorLoader';
+import { createVoteStatusLoader } from './utils/createVoteStatusLoader';
 
 const main = async () => {
 	const conn = await createConnection({
@@ -38,6 +41,7 @@ const main = async () => {
 
 	const RedisStore = connectRedis(session);
 	const redis = new Redis();
+	// app.set("proxy",1)
 
 	app.use(cors({ origin: 'http://localhost:3000', credentials: true }));
 
@@ -69,6 +73,8 @@ const main = async () => {
 			req,
 			res,
 			redis,
+			userLoader: createCreatorLoader(),
+			updootLoader: createVoteStatusLoader(),
 		}),
 	});
 
